@@ -511,7 +511,7 @@ download_sources() {
 	# Ensure sources are downloaded
 	sudo -u "$makepkg_user" --preserve-env=GNUPGHOME \
 		env SRCDEST="$SRCDEST" BUILDDIR="$WORKDIR" \
-		makepkg --config="$copydir/etc/makepkg.conf" --verifysource -o ||
+		makepkg -A --config="$copydir/etc/makepkg.conf" --verifysource -o ||
 		die "Could not download sources."
 }
 
@@ -555,7 +555,7 @@ move_products() {
 # }}}
 
 main() {
-	default_makepkg_args=(--syncdeps --noconfirm --log --holdver --skipinteg)
+	default_makepkg_args=(--ignorearch --syncdeps --noconfirm --log --holdver --skipinteg)
 	makepkg_args=("${default_makepkg_args[@]}")
 	keepbuilddir=false
 	update_first=false

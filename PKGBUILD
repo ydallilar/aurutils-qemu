@@ -2,7 +2,7 @@
 
 _package=aurutils-qemu
 pkgname=${_package}-git
-pkgver=1.df0c42f
+pkgver=2.ea87a86
 pkgrel=1
 pkgdesc="..."
 arch=('any')

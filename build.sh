@@ -29,6 +29,8 @@ add_qemu aur-sync aurutils build
 
 add_qemu makechrootpkg devtools arch-nspawn
 
+sed -i 's/makepkg --/makepkg -A --/g' devtools/makechrootpkg-qemu
+sed -i 's/(--syncdeps/(--ignorearch --syncdeps/g' devtools/makechrootpkg-qemu
 
 
 

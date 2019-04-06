@@ -107,12 +107,12 @@ if ((prepare)); then
         sudo arch-nspawn-qemu -C "$tmp"/pacman.conf -M "$makepkg_conf" \
              "$directory"/root "${bindmounts_ro[@]}" pacman -Syu --noconfirm
     else
-        # parent path is not created by mkarchroot (#371)
+        # parent path is not created by mkarchroot-qemu (#371)
         if [[ ! -d $directory ]]; then
             sudo install -d "$directory" -m 755 -v
         fi
 
-        sudo mkarchroot -C "$tmp"/pacman.conf -M "$makepkg_conf" \
+        sudo mkarchroot-qemu -C "$tmp"/pacman.conf -M "$makepkg_conf" \
              "$directory"/root base-devel
     fi
 fi
