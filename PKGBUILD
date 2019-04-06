@@ -2,12 +2,13 @@
 
 _package=aurutils-qemu
 pkgname=${_package}-git
-pkgver=2.ea87a86
+pkgver=3.05e9ce3
 pkgrel=1
 pkgdesc="..."
 arch=('any')
 url="https://github.com/librespot-org/librespot"
 depends=('aurutils')
+makedepends=('git')
 source=('git+https://github.com/pssncp142/aurutils-qemu.git')
 sha256sums=('SKIP')
 
