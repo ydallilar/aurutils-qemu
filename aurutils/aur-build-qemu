@@ -1,0 +1,291 @@
+#!/bin/bash
+# aur-build - build packages to a local repository
+set -o errexit
+shopt -s extglob
+readonly argv0=build
+readonly startdir=$PWD
+readonly XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+readonly PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+
+# default arguments
+chroot_args=()
+gpg_args=(--detach-sign --no-armor --batch)
+makechrootpkg_args=(-cu)
+makepkg_args=(--clean --syncdeps)
+repo_add_args=()
+
+# default options
+chroot=0 delta=0 no_sync=0 overwrite=0 sign_pkg=0 run_pkgver=0 results=0
+
+conf_single() {
+    awk -v "repo=[$1]" '
+    /^\[.*\]$/ {
+        do_print = ($1 == "[options]" || $1 == repo)
+    }
+    do_print'
+}
+
+db_replaces() {
+    bsdcat "$1" | awk '
+    /%REPLACES%/ {
+        while(NF != 0) { getline; print; }
+    }'
+}
+
+trap_exit() {
+    if ! [[ -o xtrace ]]; then
+        rm -rf "$tmp" "$var_tmp"
+    fi
+}
+
+usage() {
+    plain "usage: $argv0 [-d repo] [-aCDMr path] [-cfNRXsv] [--] <makepkg args>" >&2
+    exit 1
+}
+
+source /usr/share/makepkg/util/util.sh
+source /usr/share/makepkg/util/message.sh
+source /usr/share/makepkg/util/parseopts.sh
+
+if [[ -t 2 && ! -o xtrace ]]; then
+    colorize
+fi
+
+## option parsing
+opt_short='a:B:C:d:D:M:r:cfNRXsv'
+opt_long=('arg-file:' 'chroot' 'database:' 'force' 'root:' 'delta' 'sign'
+          'verify' 'directory:' 'no-sync' 'pacman-conf:' 'results:'
+          'makepkg-conf:' 'remove' 'build-command:' 'pkgver')
+opt_hidden=('dump-options')
+
+if ! parseopts "$opt_short" "${opt_long[@]}" "${opt_hidden[@]}" -- "$@"; then
+    usage
+fi
+set -- "${OPTRET[@]}"
+
+unset queue db_name db_path db_root build_cmd m_conf p_conf results_file
+while true; do
+    case "$1" in
+        -a|--arg-file)      shift; queue=$1 ;;
+        -d|--database)      shift; db_name=$1
+                            chroot_args+=(-d "$1") ;;
+        -r|--root)          shift; db_root=$1 ;;
+        -c|--chroot)        chroot=1 ;;
+        -f|--force)         overwrite=1 ;;
+        -X|--delta)         delta=1 ;;
+        -s|--sign)          sign_pkg=1
+                            repo_add_args+=(-s) ;;
+        -v|--verify)        repo_add_args+=(-v) ;;
+        -B|--build-command) shift; build_cmd+=("$1") ;;
+        -D|--directory)     shift; chroot_args+=(-D "$1") ;;
+        -C|--pacman-conf)   shift; chroot_args+=(-C "$1"); p_conf=$1 ;;
+        -M|--makepkg-conf)  shift; chroot_args+=(-M "$1"); m_conf=$1 ;;
+        -N|--no-sync)       no_sync=1 ;;
+        -R|--remove)        repo_add_args+=(-R) ;;
+        --pkgver)           run_pkgver=1
+                            makepkg_args+=(--holdver) ;;
+        --results)          shift; results_file=$1 ;;
+        --dump-options) printf -- '--%s\n' "${opt_long[@]}"
+                        printf -- '%s' "${opt_short}" | sed 's/.:\?/-&\n/g'
+                        exit ;;
+        --) shift; break ;;
+    esac
+    shift
+done
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/$argv0".XXXXXXXX)
+var_tmp=$(mktemp -d "${TMPDIR:-/var/tmp}/$argv0".XXXXXXXX)
+
+trap 'trap_exit' EXIT
+trap 'exit' INT
+
+# reset default makechrootpkg arguments
+if (($#)); then
+    if ((chroot)); then
+        makechrootpkg_args=("$@")
+    else
+        makepkg_args=("$@")
+    fi
+fi
+
+if ((delta)); then
+    repo_add_args+=(-d)
+fi
+
+# assign environment variables
+: "${db_name=$AUR_REPO}"
+: "${db_root=$AUR_DBROOT}"
+
+case $db_name in
+    "")
+        case $db_root in
+            "") db_path=$(aur repo)
+                db_name=$(basename "$db_path" .db)
+                db_root=$(dirname "$db_path")
+                ;;
+             *) error "$argv0: root specified without database name"
+                exit 1 ;;
+        esac ;;
+    *)
+        case $db_root in
+            "") db_path=$(aur repo -d "$db_name")
+                db_name=$(basename "$db_path" .db)
+                db_root=$(dirname "$db_path")
+                ;;
+             *) db_path=$db_root/$db_name.db
+                ;;
+        esac ;;
+esac
+
+# resolve symbolic link
+if ! db_path=$(readlink -e -- "$db_path"); then
+    error "$argv0: $db_path: no such file or directory"
+    exit 2
+fi
+
+if ! [[ -w $db_path ]]; then
+    error "$argv0: $db_path: permission denied"
+    exit 13
+fi
+
+if [[ -v queue ]]; then
+    exec {fd}< "$queue"
+else
+    exec {fd}< <(printf '\n')
+fi
+
+# write successfully built packages to file (#437)
+if [[ -v results_file ]]; then
+    if [[ -w $results_file ]]; then
+        results=1
+    else
+        error "$argv0: $results_file: permission denied"
+        exit 13
+    fi
+fi
+
+if ((sign_pkg)); then
+    if [[ -v GPGKEY ]]; then
+        gpg --list-keys "$GPGKEY"
+        gpg_args+=(-u "$GPGKEY")
+    fi
+else
+    db_sigs=("$db_root/$db_name".sig "$db_root/$db_name".files.sig)
+
+    if [[ -f ${db_sigs[0]} ]]; then
+        # avoid errors from stale db.sig files
+        error "$argv0: database signature found, but signing is disabled"
+
+        printf '%q\n' >&2 "${db_sigs[@]}"
+        exit 1
+    fi
+fi
+
+# configuration for container builds
+if ((chroot)); then
+    aur chroot-qemu --no-build "${chroot_args[@]}"
+fi
+
+# configuration for host builds
+pacman-conf --config "${p_conf:-/etc/pacman.conf}" | conf_single "$db_name" >"$tmp"/custom.conf
+
+# PKGDEST is defined later through makepkg.conf (#513)
+unset PKGDEST
+
+{ cat -s "${m_conf:-/etc/makepkg.conf}"
+
+  if [[ -r $XDG_CONFIG_HOME/pacman/makepkg.conf ]]; then
+      cat -s "$XDG_CONFIG_HOME"/pacman/makepkg.conf
+  elif [[ -r $HOME/.makepkg.conf ]]; then
+      cat -s "$HOME"/.makepkg.conf
+  fi
+
+  # PKGDEST defined here is NOT exported to the build environment.
+  # This is not a concern for container builds, as makechrootpkg
+  # already has a similar mechanism. (#498)
+  printf "PKGDEST='%s'\\n" "$var_tmp"
+} >"$tmp"/makepkg.conf
+
+while IFS= read -ru "$fd" path; do
+    cd_safe "$startdir/$path"
+
+    # run pkgver before --packagelist (#500)
+    if ((run_pkgver)); then
+        makepkg --noprepare -od
+    fi
+
+    if ! ((overwrite)); then
+        unset mark
+
+        while IFS= read -r; do
+            [[ -f $REPLY ]] && mark+=("$REPLY")
+        done < <(PKGDEST="$db_root" makepkg --packagelist)
+
+        if [[ ${mark[*]} ]]; then
+            warning "skipping built package (use -f to overwrite)"
+
+            printf '%q\n' >&2 "${mark[@]}"
+            continue
+        fi
+    fi
+
+    if [[ -v build_cmd ]]; then
+        printf '%s\n' >&2 "Running custom command: ${build_cmd[*]}"
+        env PKGDEST="$var_tmp" AUR_REPO="$db_name" AUR_DBROOT="$db_root" "${build_cmd[@]}"
+    elif ((chroot)); then
+        printf '%s\n' >&2 "Running makechrootpkg ${makechrootpkg_args[*]}"
+        env PKGDEST="$var_tmp" aur chroot-qemu --no-prepare "${chroot_args[@]}" -- "${makechrootpkg_args[@]}"
+    else
+        printf '%s\n' >&2 "Running makepkg ${makepkg_args[*]}"
+
+        # unset SHELLOPTS due to odd behavior with fakeroot (a /bin/sh
+        # script) when it is set in the environment. see:
+        # https://lists.gnu.org/archive/html/bug-bash/2011-10/msg00052.html
+        env -u SHELLOPTS makepkg --config "$tmp"/makepkg.conf "${makepkg_args[@]}"
+    fi
+
+    cd_safe "$var_tmp"
+    pkglist=(!(*.sig)) # discard makepkg --sign from package list (#410)
+    siglist=()
+
+    # pkglist should not be empty (#513)
+    if [[ ${pkglist[*]} == '!(*.sig)' ]]; then
+        error "$argv0: invalid argument (no packages found)"
+        exit 22
+    fi
+
+    for p in "${pkglist[@]}"; do
+        if [[ -f $p.sig ]]; then
+            warning "$argv0: existing package signature found"
+            siglist+=("$p".sig)
+
+        elif ((sign_pkg)); then
+            gpg "${gpg_args[@]}" --output "$p".sig "$p"
+            siglist+=("$p".sig)
+        fi
+    done
+
+    # move build products (relative paths)
+    mv -f "${pkglist[@]}" "${siglist[@]}" "$db_root"
+
+    # update database
+    cd_safe "$db_root"
+    LANG=C repo-add "${repo_add_args[@]}" "$db_path" "${pkglist[@]}"
+
+    if ((results)); then
+        printf '%s\n' "${pkglist[@]}" | tee -a "$results_file"
+    fi
+
+    if ((chroot)) || ((no_sync)); then
+        continue
+    else
+        replaces=$(grep -Fxf <(db_replaces "$db_path") <(pacman -Qq) | paste -s -d, -)
+
+        sudo pacman -Fy  --config="$tmp"/custom.conf
+        sudo pacman -Syu --config="$tmp"/custom.conf --ignore="$replaces" --noconfirm
+    fi
+done
+
+exec {fd}<&-
+
+# vim: set et sw=4 sts=4 ft=sh:

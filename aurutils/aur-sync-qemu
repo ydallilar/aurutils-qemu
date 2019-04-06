@@ -1,0 +1,307 @@
+#!/bin/bash
+# aur-sync - download and build AUR packages automatically
+set -o errexit
+shopt -s extglob
+readonly argv0=sync
+readonly XDG_CACHE_HOME=${XDG_CACHE_HOME:-$HOME/.cache}
+readonly AURDEST=${AURDEST:-$XDG_CACHE_HOME/aurutils/$argv0}
+readonly AURDEST_SNAPSHOT=${AURDEST_SNAPSHOT:-$XDG_CACHE_HOME/aurutils/snapshot}
+readonly PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+
+# default arguments
+build_args=()
+fetch_args=()
+makechrootpkg_args=(-cu)
+makechrootpkg_makepkg_args=()
+makepkg_args=(--clean --syncdeps)
+repo_args=()
+
+# default options (enabled)
+build=1 chkver_depth=2 download=1 view=1 provides=0 graph=1
+
+# default options (disabled)
+chroot=0 rotate=0 snapshot=0 update=0
+
+lib32() {
+    awk -v arch="$(uname -m)" '{
+        if(arch == "i686") {
+            gsub(/^lib32-/,"")
+            gsub(/^gcc-multilib$/,"")
+        }
+        print
+    }'
+}
+
+# files: $1 pkgname\tpkgbase $2 pkgname (order by $2)
+select_pkgbase() {
+    awk 'NR == FNR {
+        map[$1] = $2
+        next
+    }
+    $1 in map {
+        base = map[$1]
+
+        # only print pkgbase on first occurence
+        if (base in seen) {
+            next
+        } else {
+            print base
+            seen[base]
+        }
+    }' "$@"
+}
+
+# fields: $1 pkgname, $2 depends[<>=]
+tr_ver() {
+    awk -F'[<>=]' '{print $1}'
+}
+
+complement() {
+    # empty set should not return 1
+    grep -Fxvf "$@" || return $(($?-1))
+}
+
+order() {
+    cut -f1,2 depends | tr_ver | tsort
+}
+
+trap_exit() {
+    if [[ ! -o xtrace ]]; then
+        rm -rf "$tmp" "$tmp_view"
+    fi
+}
+
+usage() {
+    plain "usage: $argv0 [-d repo] [-CDM path] [-AcfgkLnpPstTu] [--] pkgname..." >&2
+    exit 1
+}
+
+source /usr/share/makepkg/util/util.sh
+source /usr/share/makepkg/util/message.sh
+source /usr/share/makepkg/util/parseopts.sh
+
+if [[ -t 2 && ! -o xtrace ]]; then
+    colorize
+fi
+
+opt_short='B:C:d:D:M:AcfgkLnpPrRstTu'
+opt_long=('bind:' 'bind-rw:' 'database:' 'directory:' 'ignore:'
+          'root:' 'makepkg-conf:' 'pacman-conf:' 'chroot' 'continue'
+          'force' 'ignore-arch' 'log' 'no-confirm' 'no-ver' 'no-graph'
+          'no-ver-shallow' 'no-view' 'print' 'provides' 'rm-deps'
+          'sign' 'temp' 'tar' 'upgrades' 'git' 'pkgver' 'rebuild'
+          'rebuild-tree' 'build-command:' 'ignore-file:')
+opt_hidden=('dump-options' 'allan' 'ignorearch' 'noconfirm' 'nover'
+            'nograph' 'nover-shallow' 'noview' 'rebuildtree' 'rmdeps')
+
+if ! parseopts "$opt_short" "${opt_long[@]}" "${opt_hidden[@]}" -- "$@"; then
+    usage
+fi
+set -- "${OPTRET[@]}"
+
+unset pkg pkg_i
+while true; do
+    case "$1" in
+        -d|--database)        shift; repo_args+=(-d "$1") ;;
+        -B|--build-command)   shift; build_args+=(-B "$1") ;;
+        -D|--directory)       shift; build_args+=(-D "$1") ;;
+        -M|--makepkg-conf)    shift; build_args+=(--makepkg-conf "$1") ;;
+        -C|--pacman-conf)     shift; build_args+=(--pacman-conf "$1") ;;
+        --bind)               shift; makechrootpkg_args+=(-D "$1") ;;
+        --bind-rw)            shift; makechrootpkg_args+=(-d "$1") ;;
+        --ignore)             shift; IFS=, read -a pkg -r <<< "$1"
+                              pkg_i+=("${pkg[@]}") ;;
+        --ignore-file)        shift; mapfile -t pkg_i < "$1" ;;
+        --root)               shift; repo_args+=(-r "$1") ;;
+        -A|--ignore?(-)arch)  makepkg_args+=(--ignorearch)
+                              makechrootpkg_makepkg_args+=(-A) ;;
+        -c|--chroot)          chroot=1; build_args+=(-c) ;;
+        -f|--force)           build_args+=(-f) ;;
+        -g|--git)             snapshot=0 ;;
+        -L|--log)             makepkg_args+=(--log) ;;
+        -P|--provides)        provides=1 ;;
+        -n|--no?(-)confirm)   makepkg_args+=(--noconfirm) ;;
+        -p|--print)           build=0 ;;
+        -r|--rm?(-)deps)      makepkg_args+=(--rmdeps) ;;
+        -R)                   build_args+=(-R) ;;
+        -s|--sign)            build_args+=(-sv) ;;
+        -t|--tar)             snapshot=1 ;;
+        -T|--temp)            makechrootpkg_args+=(-T) ;;
+        -u|--upgrades)        update=1 ;;
+        --allan)              rotate=1 ;;
+        --continue)           download=0 ;;
+        --no?(-)graph)        graph=0 ;;
+        --no?(-)ver)          chkver_depth=0 ;;
+        --no?(-)ver-shallow)  chkver_depth=1 ;;
+        --no?(-)view)         view=0 ;;
+        --pkgver)             build_args+=(--pkgver) ;;
+        --rebuild)            build_args+=(-f); chkver_depth=1 ;;
+        --rebuild?(-)tree)    build_args+=(-f); chkver_depth=0 ;;
+        --dump-options)       printf -- '--%s\n' "${opt_long[@]}" ;
+                              printf -- '%s' "${opt_short}" | sed 's/.:\?/-&\n/g' ;
+                              exit ;;
+        --) shift; break ;;
+    esac
+    shift
+done
+
+tmp=$(mktemp -dt "$argv0".XXXXXXXX)
+tmp_view=$(mktemp -dt view.XXXXXXXX)
+trap 'trap_exit' EXIT
+
+if ((rotate)); then
+    if { hash rot13 && target=$(aur pkglist | shuf -n 1); } 2>/dev/null; then
+        exec bash -c "{ aur \"$argv0\" -c \"$target\" && repo-elephant | rot13; } 2>&1 | rot13"
+    else
+        echo '?'; exit 16 # EBUSY
+    fi
+fi
+
+if ! (($# + update)); then
+    error "$argv0: no targets specified"
+    exit 1
+fi
+
+if ((snapshot)); then
+    aur_workdir=$AURDEST_SNAPSHOT
+    fetch_args=(-L "$tmp_view" -t)
+else
+    aur_workdir=$AURDEST
+    fetch_args=(-L "$tmp_view" -g)
+fi
+
+mkdir -p "$aur_workdir"
+cd_safe "$tmp"
+
+# retrieve path to local repo (#448)
+aur repo "${repo_args[@]}" --list --status-file=db >db_info
+
+{ IFS= read -r db_name
+  IFS= read -r db_root
+} <db
+
+if [[ -w $db_root/$db_name.db ]]; then
+    msg "Using [$db_name] repository" >&2
+else
+    error "$argv0: $db_root/$db_name.db: permission denied"
+    exit 13
+fi
+
+{ if (($#)); then
+      printf '%s\n' "$@"
+  fi
+
+  if ((update)); then
+      aur vercmp --quiet <db_info
+  fi
+} >argv
+
+if [[ -s argv ]]; then
+    # $1 pkgname $2 depends $3 pkgbase $4 pkgver
+    xargs --arg-file=argv aur depends --table >depends
+else
+    plain "there is nothing to do" >&2
+    exit
+fi
+
+# $1 pkgname $2 pkgbase $3 pkgver
+cut -f2 --complement depends | sort -u >pkginfo
+
+{ if ((${#pkg_i[@]})); then
+      printf >&2 'warning: ignoring %s package\n' "${pkg_i[@]}"
+      printf '%s\n' "${pkg_i[@]}"
+  fi
+
+  # packages with equal or newer versions are taken as complement
+  # for the queue. if chkver_shallow is enabled, packages on the
+  # command-line are excluded from this complement
+  if ((chkver_depth)); then
+      # note: AUR cannot be queried by pkgbase (FS#57230)
+      cut -f1,3 pkginfo | aur vercmp -p db_info -c >current
+
+      case $chkver_depth in
+          1) cat current | complement argv ;;
+          2) cat current ;;
+      esac
+  fi
+
+  if ((provides)); then
+      # note: this uses pacman's copy of the repo (as used by makepkg -s)
+      cut -f1 pkginfo | complement argv | aur repo-filter -d "$db_name"
+  fi
+} >filter
+
+# pkgname queue (AUR + repos)
+if order depends >queue_0; then
+    tac queue_0 | lib32 | complement filter >queue_1
+else
+    # input contains a loop
+    error "$argv0: invalid argument"
+    exit 22
+fi
+
+# pkgbase queue (AUR)
+cut -f1,2 pkginfo | select_pkgbase - queue_1 >queue
+
+if [[ -s queue ]]; then
+    cd_safe "$aur_workdir"
+else
+    plain "there is nothing to do" >&2
+    exit
+fi
+
+if ((download)); then
+    msg "Retrieving package files" >&2
+    aur jobs -Xj +3 --nice 10 --halt soon,fail=1 --keep-order \
+        aur fetch "${fetch_args[@]}" :::: "$tmp"/queue
+fi
+
+# link build files in the queue (absolute links)
+aur jobs -X ln -s "$(pwd -P)"/{} "$tmp_view" :::: "$tmp"/queue
+
+if type -P >/dev/null vifm; then
+    # avoid directory prefix in printed paths (#452)
+    viewer() ( cd "$1"; vifm -c 'view!' -c '0' - )
+else
+    # shellcheck disable=SC2086
+    viewer() ( cd "$1"; command -- ${PAGER:-less -K -+F} )
+fi
+
+# check if dependency graph is valid
+if ((graph)); then
+    aur graph "$tmp_view"/*/.SRCINFO >/dev/null
+fi
+
+if ((view)); then
+    if [[ -v AUR_PAGER ]]; then
+        # shellcheck disable=SC2086
+        command -- $AUR_PAGER "$tmp_view"
+    else
+        { # print patch files
+          find "$tmp_view" -maxdepth 1 -type f
+
+          # print build-qemu directories in dependency order
+          xargs -I{} -a "$tmp"/queue find -L "$tmp_view"/{} -maxdepth 1
+        } | viewer "$tmp_view"
+
+        # ask for confirmation when using PAGER (#530)
+        if [[ -v PAGER ]]; then
+            read -p $'Press any key to continue or ctrl+d to abort\n'
+        fi
+    fi
+fi
+
+if ((build)); then
+    build_args+=(-a "$tmp"/queue -d "$db_name" -r "$db_root")
+
+    if ((chroot)); then
+        aur build-qemu "${build_args[@]}" -- "${makechrootpkg_args[@]}" \
+            -- "${makechrootpkg_makepkg_args[@]}"
+    else
+        aur build-qemu "${build_args[@]}" -- "${makepkg_args[@]}"
+    fi
+else
+    xargs -a "$tmp"/queue -I{} printf '%s\n' "$(pwd -P)"/{}
+fi
+
+# vim: set et sw=4 sts=4 ft=sh:

@@ -1,0 +1,128 @@
+#!/bin/bash
+# aur-chroot - build packages with systemd-nspawn
+set -o errexit
+readonly argv0=chroot
+readonly PATH=/bin:/usr/bin
+readonly PS4='+(${BASH_SOURCE}:${LINENO}): ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+
+machine=$(uname -m)
+readonly machine
+
+# default arguments
+directory=/var/lib/aurbuild/$machine
+makechrootpkg_args=(-cu)
+makechrootpkg_bindmounts_ro=()
+bindmounts_ro=()
+
+# default options
+prepare=1 build=1
+
+ignore_defaults() {
+    awk '/^RootDir/ || /^DBPath/ || /^HookDir/ || /^GPGDir/ || /^LogFile/ {
+        next
+    } { print }'
+}
+
+host_with_cache() {
+    printf '[%s]\n' options
+    pacman-conf --verbose CacheDir
+
+    for a in "$@"; do
+        printf '[%s]\n' "$a"
+        pacman-conf --repo "$a"
+    done
+}
+
+trap_exit() {
+    if ! [[ -o xtrace ]]; then
+        rm -rf "$tmp"
+    fi
+}
+
+usage() {
+    printf >&2 'usage: %s [-d repo] [-CDM path] -- <makechrootpkg-qemu args>\n' "$argv0"
+    exit 1
+}
+
+source /usr/share/makepkg/util/parseopts.sh
+
+opt_short='d:C:D:M:'
+opt_long=('database' 'directory' 'pacman-conf' 'makepkg-conf' 'no-build' 'no-prepare')
+opt_hidden=('dump-options')
+
+if ! parseopts "$opt_short" "${opt_long[@]}" "${opt_hidden[@]}" -- "$@"; then
+    usage
+fi
+set -- "${OPTRET[@]}"
+
+# FIXME: add --sysroot to set pacconf host, see pacutils-sysroot(7)
+unset pacman_conf makepkg_conf host_repo server
+while true; do
+    case "$1" in
+        -d|--database) shift; host_repo+=("$1") ;;
+        -D|--directory) shift; directory=$1 ;;
+        -C|--pacman-conf) shift; pacman_conf=$1 ;;
+        -M|--makepkg-conf) shift; makepkg_conf=$1 ;;
+        --no-build)     build=0 ;;
+        --no-prepare)   prepare=0 ;;
+        --dump-options) printf -- '--%s\n' "${opt_long[@]}" ;
+                        printf -- '%s' "${opt_short}" | sed 's/.:\?/-&\n/g' ;
+                        exit ;;
+        --) shift; break ;;
+    esac
+    shift
+done
+
+tmp=$(mktemp -d)
+trap 'trap_exit' EXIT
+
+# reset default makechrootpkg arguments
+if (($#)); then
+    makechrootpkg_args=("$@")
+fi
+
+# baseline configuration
+pacman_conf=${pacman_conf-/usr/share/devtools/pacman-multilib.conf}
+makepkg_conf=${makepkg_conf-/usr/share/devtools/makepkg-$machine.conf}
+
+# CacheDir will be replaced by devtools (#416)
+host_with_cache "${host_repo[@]}" >"$tmp"/custom.conf
+
+# bind mount all file:// paths to container (#461)
+while read -r key _ value; do
+    case $key=$value in
+        Server=file://*)
+            bindmounts_ro+=("--bind-ro=${value#file://}")
+            makechrootpkg_bindmounts_ro+=(-D "${value#file://}") ;;
+    esac
+done < "$tmp"/custom.conf
+
+if ((prepare)); then
+    # do not print DBPath (#412)
+    pacman-conf -c "$pacman_conf" | ignore_defaults \
+        | cat - "$tmp"/custom.conf >"$tmp"/pacman.conf
+
+    if [[ -f $directory/root/.arch-chroot ]]; then
+        # locking is done by systemd-nspawn
+        sudo arch-nspawn-qemu -C "$tmp"/pacman.conf -M "$makepkg_conf" \
+             "$directory"/root "${bindmounts_ro[@]}" pacman -Syu --noconfirm
+    else
+        # parent path is not created by mkarchroot (#371)
+        if [[ ! -d $directory ]]; then
+            sudo install -d "$directory" -m 755 -v
+        fi
+
+        sudo mkarchroot -C "$tmp"/pacman.conf -M "$makepkg_conf" \
+             "$directory"/root base-devel
+    fi
+fi
+
+if ((build)); then
+    sudo --preserve-env=GNUPGHOME,PKGDEST makechrootpkg-qemu -r "$directory" \
+         "${makechrootpkg_bindmounts_ro[@]}" "${makechrootpkg_args[@]}"
+else
+    printf >&2 'container path: %q\n' "$directory"
+    exit 0
+fi
+
+# vim: set et sw=4 sts=4 ft=sh:

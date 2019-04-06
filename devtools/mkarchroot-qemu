@@ -1,0 +1,5 @@
+#!/bin/bash
+
+mkarchroot -s -c /var/cache/pacman/pkg-arm \
+	-f /usr/bin/qemu-arm-static $@
+

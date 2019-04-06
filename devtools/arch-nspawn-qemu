@@ -1,0 +1,4 @@
+#!/bin/bash
+
+arch-nspawn -s -c /var/cache/pacman/pkg-arm $@ 
+
