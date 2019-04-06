@@ -37,5 +37,7 @@ And we are good to go:
 	
 
 Further reading:
+
 https://kbeckmann.github.io/2017/05/26/QEMU-instead-of-cross-compiling/
+
 https://wiki.parabola.nu/Building_armv7h_packages_on_a_x86_system
