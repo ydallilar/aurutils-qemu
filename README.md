@@ -1,7 +1,11 @@
 
 **aurutils-qemu**
 
-This is an experimental project me figuring out how to compile AUR packages on x86_64 machine for my poor Raspberry Pi (easy way!). It is a combination of extensions for `devtools` of ArchLinux and [aurutils](https://github.com/AladW/aurutils). Introduces three additional commands for `aurutils`:
+This is an experimental project me figuring out how to compile AUR packages on x86_64 machine for my poor Raspberry Pi (easy way!). The idea is to compile AUR packages for your ARM machines in a Qemu emulated chroot. Basically, it is same as  [this ](https://wiki.archlinux.org/index.php/DeveloperWiki:Building_in_a_clean_chroot), but here, the chroot is emulated by Qemu. This is *waaay* faster than virtual machines because you are not emulating the whole system just the applications and you have full access to the resources of your host. 
+
+You may say why not use cross toolchains via distcc. They are painful to maintain, install etc. Also, some languages don't have support for distcc (like rust). 
+
+It is a combination of extensions for `devtools` of ArchLinux and [aurutils](https://github.com/AladW/aurutils). Introduces three additional commands for `aurutils`:
 
 	aur build-qemu
 	aur sync-qemu
@@ -30,5 +34,8 @@ And we are good to go:
 
 	aur build-qemu -c -D $CHROOT -C $PACMAN_CONF -M $MAKEPKG_CONF -d $ARMV6_REPO
 	aur sync-qemu -c -D $CHROOT -C $PACMAN_CONF -M $MAKEPKG_CONF -d $ARMV6_REPO $AUR_PACKAGE
+	
 
-
+Further reading:
+https://kbeckmann.github.io/2017/05/26/QEMU-instead-of-cross-compiling/
+https://wiki.parabola.nu/Building_armv7h_packages_on_a_x86_system
