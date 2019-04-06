@@ -22,7 +22,7 @@ These are very similar to existing non Qemu versions with a few tweaks:
 
 1. Install `binfmt-qemu-static` and `qemu-user-static` packages from AUR. `mkarchroot-qemu` puts `qemu-arm-static` to the root of the chroot directory.
 2. Grab `pacman.conf` and `makepkg.conf` from your ArchLinuxARM installation. The procedure detects the relevant architecture from the supplied `pacman.conf`. I am providing `pacman_armv6.conf` and `makepkg_armv6.conf` as an example. 
-3. (Optional to create a chroot for scratch) Grab and install `archlinuxarm-keyring` to your host. During `mkarchroot` process, `pacman` checks the keys in your host so it will fail if you don't.  
+3. (Optional to create a chroot from scratch) Grab and install `archlinuxarm-keyring` to your host. During `mkarchroot` process, `pacman` checks the keys in your host so it will fail if you don't.  
 4. (Optional to use an existing chroot) You can also use your manual chroot for the process. Make sure you put in somewhere like `$CHROOT/root`. Put `qemu-arm-static` in the directory in its root directory and do a one time chroot using `arch-nspawn-qemu`. 
 5. Follow the instructions from [aurutils](https://github.com/AladW/aurutils) on how to create your own local repository. The repository must be defined in your custom `pacman_$arch.conf` instead of `/etc/pacman.conf`!.
 
