@@ -23,7 +23,7 @@ add_qemu(){
 	esac
 }
 
-add_qemu aur-chroot aurutils arch-nspawn makechrootpkg
+add_qemu aur-chroot aurutils arch-nspawn makechrootpkg mkarchroot
 add_qemu aur-build aurutils chroot
 add_qemu aur-sync aurutils build
 
